@@ -1,0 +1,67 @@
+# External 24/7 prober — GitHub Actions path.
+#
+# Copy this file to  .github/workflows/perchance-status.yml  in a repo you own
+# (a tiny public repo is ideal). It runs every 5 minutes, probes the Perchance
+# endpoints, and publishes the JSON feed the status page ingests.
+#
+# The feed is kept on its own orphan branch (`prober-data`) as a single amended
+# commit that is force-pushed each run, so the repo does not accumulate ~288
+# commits/day of history bloat. The page then reads the feed from:
+#
+#   https://raw.githubusercontent.com/<you>/<repo>/prober-data/data/probes.json
+#
+# Paste that URL into the page's "24/7 coverage" card. GitHub serves raw files
+# public + gzip-compressed, and ignores the `?since=` query the page may append.
+#
+# Notes:
+#  - Actions cron is best-effort: runs can be delayed a few minutes under load.
+#  - If the default branch is protected, force-pushing a *different* branch is
+#    still fine — just don't protect `prober-data`.
+#  - Prefer no-repo hosting? Use cloudflare-worker.js instead (free, KV-backed,
+#    and it can serve the `?since=` delta).
+
+name: perchance-status-prober
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: perchance-status-prober
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Probe Perchance endpoints
+        env:
+          PROBER_NAME: github-actions
+          PROBER_REGION: ${{ runner.os }}
+          PROBER_INTERVAL_SEC: "300"
+        run: node src/prober/probe.mjs data/probes.json
+
+      - name: Publish feed to the prober-data branch
+        run: |
+          set -euo pipefail
+          git config user.name  "perchance-status-prober"
+          git config user.email "actions@users.noreply.github.com"
+          cp data/probes.json /tmp/probes.json
+          git checkout --orphan prober-data
+          git rm -rf --cached . >/dev/null 2>&1 || true
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          mkdir -p data
+          cp /tmp/probes.json data/probes.json
+          git add -A
+          git commit -m "probe feed $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push -f origin prober-data
