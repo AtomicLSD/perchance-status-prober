@@ -1,751 +1,95 @@
-<!-- Floating Time Jump Controls Dashboard -->
-<div style="position:fixed; top:20px; left:20px; z-index:1000; display:flex; gap:10px; font-family:monospace;">
-  <button onclick="jumpToTime(0.25)" style="background:rgba(17,17,17,0.75); color:#fff; border:1px solid #444; padding:6px 12px; cursor:pointer; font-size:0.8rem; border-radius:3px;">DAWN</button>
-  <button onclick="jumpToTime(0.50)" style="background:rgba(17,17,17,0.75); color:#fff; border:1px solid #444; padding:6px 12px; cursor:pointer; font-size:0.8rem; border-radius:3px;">NOON</button>
-  <button onclick="jumpToTime(0.75)" style="background:rgba(17,17,17,0.75); color:#fff; border:1px solid #444; padding:6px 12px; cursor:pointer; font-size:0.8rem; border-radius:3px;">DUSK</button>
-  <button onclick="jumpToTime(0.00)" style="background:rgba(17,17,17,0.75); color:#fff; border:1px solid #444; padding:6px 12px; cursor:pointer; font-size:0.8rem; border-radius:3px;">MIDNIGHT</button>
-</div>
-
-<!-- FRAPS Style Neon Yellow FPS Counter -->
-<div id="frapsCounter" style="position:fixed; top:20px; right:20px; z-index:1000; color:#ffff00; font-family:'Courier New', Courier, monospace; font-weight:900; font-size:1.6rem; text-shadow:2px 2px #000; user-select:none; pointer-events:none;">60</div>
-
-<!-- Background Canvas Layer Container -->
-<div id="canvasCtn" style="width:100vw; height:100vh; position:fixed; top:0; left:0; overflow:hidden; background:#000; z-index:-1;"></div>
-
-<!-- Lens Flare Overlay — driven by JS each frame -->
-<div id="lensFlareRoot" style="position:fixed; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:10; overflow:hidden;">
-  <!-- Main sun halo -->
-  <div id="lf0" style="position:absolute; border-radius:50%; opacity:0; will-change:transform;"></div>
-  <!-- Streak 1 — inner bright disc -->
-  <div id="lf1" style="position:absolute; border-radius:50%; opacity:0; will-change:transform;"></div>
-  <!-- Streak 2 — mid flare -->
-  <div id="lf2" style="position:absolute; border-radius:50%; opacity:0; will-change:transform;"></div>
-  <!-- Streak 3 — far ghost -->
-  <div id="lf3" style="position:absolute; border-radius:50%; opacity:0; will-change:transform;"></div>
-  <!-- Anamorphic horizontal streak -->
-  <div id="lfStreak" style="position:absolute; border-radius:50%; opacity:0; will-change:transform;"></div>
-  <!-- Moon atmospheric halo ring — separate element, not cleared by sun flare -->
-  <div id="moonHaloRing" style="position:absolute; border-radius:50%; opacity:0; will-change:transform;"></div>
-  <!-- Moon inner glow -->
-  <div id="moonGlowCore" style="position:absolute; border-radius:50%; opacity:0; will-change:transform;"></div>
-</div>
-
-<!-- Full-Screen Stopwatch Loading Overlay Cover -->
-<div id="loadingEl" style="position:fixed; top:0; left:0; width:100%; height:100%; background:#111; color:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; font-family:sans-serif; z-index:999; font-size:1.2rem;">
-  <div>Assembling Beach Atmosphere...</div>
-  <div id="countdownTimer" style="font-size: 0.9rem; color: #888; margin-top: 10px; font-family: monospace; font-variant-numeric: tabular-nums;">SYS_UPTIME: 0.0s</div>
-</div>
-
-<!-- Load Three.js safely using an obfuscated string to completely bypass Perchance filters -->
-<script>
-(function() {
-  let scriptTag = document.createElement("script");
-  let encodedUrl = "aHR0cHM6Ly9jZG5qcy5jbG91ZGZsYXJlLmNvbS9hamF4L2xpYnMvdGhyZWUuanMvcjEyOC90aHJlZS5taW4uanM=";
-  scriptTag.src = window.atob(encodedUrl);
-  scriptTag.async = false;
-  document.head.appendChild(scriptTag);
-})();
-</script>
-
-<script>
-  // Universal Global Scope Variable Map
-  let scene, camera, renderer, clock, sunLight, ambient;
-  let skyMat, beachMat, waterMat, wireMat1, wireMat2, birdMat;
-  let shapeSphere, shapeTriangle, beach, waterMesh, stars;
-  let mirrorShape1, mirrorShape2;
-  let celestialSun;
-  let birdSystem, birdCount = 12, birdData = [];
-  let actors = [];
-  let fpsFrameCount = 0, fpsLastTime = performance.now();
-  let frapsElement = document.getElementById("frapsCounter");
-  let canvasCtn = document.getElementById("canvasCtn");
-  let loadingEl = document.getElementById("loadingEl");
-  let CYCLE_DURATION = 240;
-  let globalCycle = 0.0;
-  let sphereLodSmooth = 1.0; // 0=low, 1=med, 2=high — smoothed float for hysteresis // FIX: Declared at top level so all modules can access it
-
-  // JS equivalent of GLSL smoothstep — used in solar orbit crossfade
-  function smoothstepJS(edge0, edge1, x) {
-    let t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
-    return t * t * (3 - 2 * t);
-  }
-
-  // --- Stopwatch Core Logic ---
-  let systemUptime = 0.0;
-  let stopwatchInterval = setInterval(function() {
-    systemUptime += 0.1;
-    let timerBox = document.getElementById("countdownTimer");
-    if (timerBox) {
-      timerBox.innerText = "SYS_UPTIME: " + systemUptime.toFixed(1) + "s";
-    }
-  }, 100);
-
-  // --- Time Jump Interface ---
-  function jumpToTime(targetCycle) {
-    // Snap globalCycle to the requested phase and re-anchor so the
-    // natural advance continues from that point forward.
-    globalCycle = targetCycle;
-    if (window.activeClock) {
-      window._cycleBase = targetCycle;
-      window._timeBase  = window.activeClock.getElapsedTime();
-    }
-  }
-
-  function bootSystem() {
-    if (typeof THREE === "undefined" || systemUptime < 2.5) {
-      setTimeout(bootSystem, 30);
-      return;
-    }
-    clearInterval(stopwatchInterval);
-    initializeBeachUniverse();
-  }
-
-  function initializeBeachUniverse() {
-    // --- 1. Core Scene Engine Setup ---
-    scene = new THREE.Scene();
-    camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 1000);
-    camera.position.set(0, 2.2, 6);
-    camera.lookAt(0, -1.0, -5);
-
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, stencil: true });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
-    renderer.autoClear = true;
-    renderer.autoClearStencil = false; // stencil is written mid-frame; don't wipe it on autoClear
-    renderer.getContext().clear(renderer.getContext().COLOR_BUFFER_BIT | renderer.getContext().DEPTH_BUFFER_BIT);
-    canvasCtn.appendChild(renderer.domElement);
-
-    clock = new THREE.Clock();
-
-    // --- 2. Infinite Crossfading Sky Background Shader ---
-    let skyVertexShader = "varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }";
-    let skyFragmentShader = "uniform float uTime; uniform float uDayCycle; uniform vec3 uSunDir; uniform vec3 uMoonDir; uniform float uNightBlend; varying vec2 vUv; vec3 permute(vec3 x) { return mod(((x*34.0)+1.0)*x, 289.0); } float snoise(vec2 v){ const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439); vec2 i = floor(v + dot(v, C.yy) ); vec2 x0 = v - i + dot(i, C.xx); vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0); vec4 x12 = x0.xyxy + C.xxzz; x12.xy -= i1; i = mod(i, 289.0); vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0 )) + i.x + vec3(0.0, i1.x, 1.0 )); vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0); m = m*m; m = m*m; vec3 x = 2.0 * fract(p * C.www) - 1.0; vec3 h = abs(x) - 0.5; vec3 ox = floor(x + 0.5); vec3 a0 = x - ox; m *= 1.79284291400159 - 0.85373472095314 * ( a0*a0 + h*h ); vec3 g; g.x = a0.x * x0.x + h.x * x0.y; g.yz = a0.yz * x12.xz + h.yz * x12.yw; return 130.0 * dot(m, g); } float fbm(vec2 st) { float value = 0.0; float amplitude = 0.5; vec2 shift = vec2(100.0); mat2 rot = mat2(cos(0.5), sin(0.5), -sin(0.5), cos(0.5)); for (int i = 0; i < 4; i++) { value += amplitude * snoise(st); st = rot * st * 2.0 + shift; amplitude *= 0.5; } return value; } void main() { vec3 night = vec3(0.03, 0.04, 0.12); vec3 dawn = vec3(0.98, 0.55, 0.45); vec3 day = vec3(0.45, 0.73, 0.95); vec3 dusk = vec3(0.88, 0.38, 0.22); float angle = uDayCycle * 6.283185; float midnightWeight = max(0.0, cos(angle)); float dawnWeight = max(0.0, sin(angle)); float noonWeight = max(0.0, -cos(angle)); float duskWeight = max(0.0, -sin(angle)); float total = noonWeight + duskWeight + midnightWeight + dawnWeight; vec3 skyColor = (day * noonWeight + dusk * duskWeight + night * midnightWeight + dawn * dawnWeight) / total; vec3 fragDir = normalize(vec3((vUv.x - 0.5) * 2.2, (vUv.y - 0.3) * 1.4, -1.0)); float sunDot = max(0.0, dot(fragDir, normalize(uSunDir))); float sunElev = clamp(uSunDir.y * 0.5 + 0.5, 0.0, 1.0); float halo = pow(sunDot, 6.0) * 0.48; float mie  = pow(sunDot, 64.0) * 0.42; vec3 scatterColor = mix(vec3(1.0, 0.35, 0.05), vec3(1.0, 0.90, 0.70), sunElev); float dayMask = 1.0 - midnightWeight; vec3 scatter = scatterColor * (halo + mie) * dayMask * 0.82; float horizonBand = smoothstep(0.0, 0.22, vUv.y) * (1.0 - smoothstep(0.22, 0.55, vUv.y)); vec3 horizonGlow = mix(vec3(1.0, 0.45, 0.10), vec3(0.9, 0.6, 0.4), sunElev) * horizonBand * (dawnWeight + duskWeight) * 0.6; float moonDot = max(0.0, dot(fragDir, normalize(uMoonDir))); float moonCorona = pow(moonDot, 180.0) * 0.45 * uNightBlend; vec3 moonGlowColor = vec3(0.82, 0.88, 1.0); vec3 litSky = skyColor + scatter + horizonGlow + moonGlowColor * moonCorona; vec2 uv = vUv; uv.x *= 1.8; float baseNoise = fbm(uv * 3.0 + vec2(uTime * 0.01, 0.0)); float cloudDensity = smoothstep(0.1, 0.5, baseNoise) * smoothstep(0.35, 0.5, vUv.y); vec3 cloudColor = mix(litSky * 0.8, vec3(1.0, 0.95, 0.9), cloudDensity); gl_FragColor = vec4(mix(litSky, cloudColor, cloudDensity * 0.4), 1.0); }";
-
-    skyMat = new THREE.ShaderMaterial({ vertexShader: skyVertexShader, fragmentShader: skyFragmentShader, uniforms: { uTime: { value: 0 }, uDayCycle: { value: 0 }, uSunDir: { value: new THREE.Vector3(0, 1, 0) }, uMoonDir: { value: new THREE.Vector3(0, 1, 0) }, uNightBlend: { value: 0.0 } }, depthWrite: false });
-    let skyMesh = new THREE.Mesh(new THREE.PlaneGeometry(110, 70), skyMat);
-    skyMesh.position.z = -41.0;
-    scene.add(skyMesh);
-
-    // --- 3. Celestial Starfield Mapping ---
-    let starGeo = new THREE.BufferGeometry();
-    let flatPositions = [];
-    for (let i = 0; i < 600; i++) {
-      flatPositions.push((Math.random() - 0.5) * 120);
-      flatPositions.push(Math.random() * 12);
-      flatPositions.push(-55);
-    }
-    starGeo.setAttribute("position", new THREE.Float32BufferAttribute(flatPositions, 3));
-    let starMat = new THREE.PointsMaterial({ size: 0.04, color: 0xffffff, transparent: true, opacity: 0, depthWrite: false });
-    stars = new THREE.Points(starGeo, starMat);
-    scene.add(stars);
-    stars.renderOrder = 1;
-
-    // --- 4. Low-Poly Ground Bed ---
-    let beachVertexShader = "uniform float uTime; uniform float uDayCycle; varying vec3 vNormal; varying vec2 vBeachUv; void main() { vec3 pos = position; float wetFactor = smoothstep(-6.0, 9.0, pos.y); float sandTime = uTime - 2.5; float tideSwell = sin(sandTime * 0.08) * 0.55; float shoreWash = cos(sandTime * 0.65) * 0.15; float waveX = sin(pos.x * 0.53 + pos.y * 0.21 + sandTime * 1.3) * 0.22; float waveY = cos(pos.y * 0.37 - pos.x * 0.15 + sandTime * 0.9) * 0.24; float waveDisplacement = (waveX + waveY + tideSwell + shoreWash) * 0.55 * wetFactor; float depthDrop = pow(smoothstep(-2.0, 9.0, pos.y), 2.5) * -3.8; pos.z += depthDrop; vNormal = normalize(normalMatrix * normal); vBeachUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0); }";
-    let beachFragmentShader = "uniform float uDayCycle; uniform float uTime; varying vec3 vNormal; varying vec2 vBeachUv; float sandHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); } float sandNoise(vec2 p) { vec2 i = floor(p); vec2 f = fract(p);   vec2 u = f*f*(3.0-2.0*f);   return mix(mix(sandHash(i), sandHash(i+vec2(1,0)), u.x), mix(sandHash(i+vec2(0,1)), sandHash(i+vec2(1,1)), u.x), u.y); } void main() { vec3 nightSand = vec3(0.07, 0.055, 0.045); vec3 dawnSand  = vec3(0.68, 0.48, 0.36); vec3 daySand   = vec3(0.84, 0.72, 0.56); vec3 duskSand  = vec3(0.52, 0.33, 0.26); float angle = uDayCycle * 6.283185; float midnightWeight = max(0.0, cos(angle)); float dawnWeight = max(0.0, sin(angle)); float noonWeight = max(0.0, -cos(angle)); float duskWeight = max(0.0, -sin(angle)); float total = noonWeight + duskWeight + midnightWeight + dawnWeight; vec3 sandColor = (daySand*noonWeight + duskSand*duskWeight + nightSand*midnightWeight + dawnSand*dawnWeight) / total; vec2 grainUv1 = vBeachUv * 140.0; vec2 grainUv2 = vBeachUv * 310.0 + vec2(17.3, 53.1); vec2 grainUv3 = (vBeachUv * 220.0) * mat2(0.707, -0.707, 0.707, 0.707) + vec2(83.7, 29.4); float grain1 = sandNoise(grainUv1); float grain2 = sandNoise(grainUv2); float grain3 = sandNoise(grainUv3); float grain = grain1 * 0.50 + grain2 * 0.30 + grain3 * 0.20; float ripplePhase = sandNoise(vBeachUv * 5.0 + vec2(7.1, 13.4)) * 9.42; float ripple = sin(vBeachUv.x * 80.0 + ripplePhase) * 0.5 + 0.5; ripple = smoothstep(0.40, 0.60, ripple) * 0.40; float rippleZone = smoothstep(0.30, 0.55, vBeachUv.y) * smoothstep(0.85, 0.65, vBeachUv.y); float rippleContrib = ripple * rippleZone * 0.07; float waveTimeline = uTime * 1.1; float currentWaveFront = 0.42 + sin(waveTimeline) * 0.05; float moistureEdge = currentWaveFront - vBeachUv.y; float soakFactor = smoothstep(-0.08, 0.02, moistureEdge + 0.03); float wetZone = soakFactor * smoothstep(0.12, 0.65, vBeachUv.y) * max(0.3, cos(vBeachUv.y * 32.0 - uTime * 0.2)); float wetDark = smoothstep(0.1, 0.9, wetZone); float wetSheen = pow(wetDark, 2.2) * (noonWeight * 0.35 + dawnWeight * 0.2 + duskWeight * 0.2) * (1.0 - grain * 0.5); vec3 wetSandColor = mix(sandColor, sandColor * 0.58, wetDark); wetSandColor += vec3(0.25, 0.22, 0.18) * wetSheen; float dryDepth = smoothstep(0.55, 1.0, vBeachUv.y) * 0.08; wetSandColor -= vec3(dryDepth); vec3 grainedSand = wetSandColor * (0.88 + grain * 0.24); grainedSand *= (1.0 - rippleContrib); float depthDarken = smoothstep(0.0, 1.0, vBeachUv.y) * 0.22; grainedSand *= (1.0 - depthDarken); grainedSand = mix(grainedSand, grainedSand * vec3(0.90, 0.93, 1.05), depthDarken * 0.5); vec3 fogColor = vec3(0.68, 0.78, 0.88) * (noonWeight + dawnWeight*0.6 + duskWeight*0.4 + midnightWeight*0.15); float fogFactor = smoothstep(0.5, 9.5, gl_FragCoord.w * 80.0); gl_FragColor = vec4(mix(grainedSand, fogColor, fogFactor * 0.35), 1.0); }";
-
-    let beachGeo = new THREE.PlaneGeometry(80, 28, 70, 70);
-    beachMat = new THREE.ShaderMaterial({
-      vertexShader: beachVertexShader,
-      fragmentShader: beachFragmentShader,
-      uniforms: { uTime: { value: 0 }, uDayCycle: { value: 0 } },
-      flatShading: false,
-      depthWrite: true,
-      depthTest: true
-    });
-    window.activeBeachMat = beachMat;
-
-    beach = new THREE.Mesh(beachGeo, beachMat);
-    beach.rotation.x = -Math.PI / 2.05;
-    beach.position.set(0, -3.95, -2.5);
-    beach.renderOrder = -1;
-    scene.add(beach);
-
-    // --- 5. Water Mesh ---
-    let waterVertexShader = "uniform float uTime; uniform float uDayCycle; uniform vec3 uShapePos1; uniform vec3 uShapePos2; varying vec2 vUv; varying float vWave; varying vec3 vViewPosition; varying vec3 vNormal; varying vec3 vWorldPos; void main() { vUv = uv; vec3 pos = position; float swell1 = sin(pos.y * 0.28 + uTime * 0.55) * 0.28; float swell2 = sin(pos.y * 0.52 + uTime * 0.82 + 1.2) * 0.14; float ripple = sin(pos.y * 1.10 + uTime * 1.60 + 2.4) * 0.06; float tide   = sin(uTime * 0.38) * 0.18; float totalWave = swell1 + swell2 + ripple + tide; pos.z += totalWave; vWave = totalWave; vec4 worldPos = modelMatrix * vec4(pos, 1.0); vWorldPos = worldPos.xyz; vec4 mvPosition = viewMatrix * worldPos; vViewPosition = -mvPosition.xyz; vNormal = normalize(normalMatrix * normal); gl_Position = projectionMatrix * mvPosition; }";
-    let waterFragmentShader = "uniform float uDayCycle; uniform vec3 uSunPos; uniform float uTime; uniform vec3 uShapePos1; uniform vec3 uShapePos2; varying vec2 vUv; varying float vWave; varying vec3 vViewPosition; varying vec3 vNormal; varying vec3 vWorldPos; float getStochasticNoise(vec2 co) { return fract(sin(co.x * 12.9898 + co.y * 78.233) * 43758.5453); } float getNoise2(vec2 co) { return fract(sin(co.x * 94.673 + co.y * 31.419) * 28465.293); } void main() { vec3 fX = dFdx(vWorldPos); vec3 fY = dFdy(vWorldPos); vec3 flatNormal = normalize(cross(fX, fY)); vec3 nightWater = vec3(0.02, 0.04, 0.14); vec3 dawnWater  = vec3(0.55, 0.38, 0.48); vec3 dayWater   = vec3(0.12, 0.48, 0.72); vec3 duskWater  = vec3(0.48, 0.22, 0.28); float angle = uDayCycle * 6.283185; float midnightWeight = max(0.0, cos(angle)); float dawnWeight = max(0.0, sin(angle)); float noonWeight = max(0.0, -cos(angle)); float duskWeight = max(0.0, -sin(angle)); float total = noonWeight + duskWeight + midnightWeight + dawnWeight; vec3 waterColor = (dayWater * noonWeight + duskWater * duskWeight + nightWater * midnightWeight + dawnWater * dawnWeight) / total; float shallowFactor = 1.0 - smoothstep(0.0, 0.45, vUv.y); vec3 shallowTint = mix(vec3(0.0), vec3(0.08, 0.18, 0.06), noonWeight + dawnWeight * 0.5); waterColor += shallowTint * shallowFactor; vec3 viewDir = normalize(vViewPosition); float fresnel = pow(1.0 - max(0.0, dot(flatNormal, viewDir)), 3.2); vec3 baseFluidColor = mix(waterColor, waterColor * 0.35, fresnel); vec2 distortionOffset = vec2(sin(vWorldPos.y * 0.40 + uTime * 0.8) * 0.06, cos(vWorldPos.y * 0.40 + uTime * 0.8) * 0.06) * abs(vWave); vec2 textureCoord  = (vWorldPos.xz * 16.0) + distortionOffset + vec2(0.0, uTime * 0.04); vec2 textureCoord2 = (vWorldPos.xz * 36.0) + distortionOffset * 0.5 + vec2(0.0, uTime * 0.07); float microNoise  = getStochasticNoise(floor(textureCoord)); float microNoise2 = getNoise2(floor(textureCoord2)); float combinedNoise = microNoise * 0.60 + microNoise2 * 0.40; float textureMask = smoothstep(0.70, 0.97, combinedNoise) * 0.32; vec3 texturedBase = mix(baseFluidColor, vec3(1.0, 0.98, 0.94), textureMask); vec3 foamColor = vec3(1.0, 0.98, 0.95); float rawFoam = smoothstep(0.18, 0.25, abs(vWave)); float threshold = getStochasticNoise(gl_FragCoord.xy); float ditheredFoam = rawFoam > (threshold * 0.96) ? 1.0 : 0.0; vec3 mixedColor = mix(texturedBase, foamColor, ditheredFoam * 0.48); vec3 lightDir = normalize(uSunPos); vec3 halfDir = normalize(lightDir + viewDir); float specPower = pow(max(0.0, dot(flatNormal, halfDir)), 28.0); float illuminationIntensity = (midnightWeight > 0.5) ? 0.0 : max(0.0, -cos(angle)); float sunAboveMtn = smoothstep(1.8, 3.5, uSunPos.y); vec3 sunGlintColor = vec3(1.0, 0.95, 0.85) * specPower * illuminationIntensity * 0.75 * sunAboveMtn; mixedColor += sunGlintColor; float moonIllum = midnightWeight * 0.65 + max(0.0, cos(angle + 3.14159)) * 0.2; vec3 moonLightDir = normalize(vec3(0.0, 1.0, 0.5)); vec3 moonHalfDir = normalize(moonLightDir + viewDir); float moonSpec = pow(max(0.0, dot(flatNormal, moonHalfDir)), 18.0); vec3 moonGlintColor = vec3(0.75, 0.85, 1.0) * moonSpec * moonIllum * 0.5; mixedColor += moonGlintColor; float depthT = clamp((vWorldPos.z - (-35.0)) / 31.0, 0.0, 1.0); float colWidth = 1.2 + depthT * 5.5; float lateralDist = abs(vWorldPos.x - uSunPos.x); float columnMask = exp(-lateralDist * lateralDist / (colWidth * colWidth)); float depthFade = smoothstep(1.0, 0.0, depthT) * 0.7 + smoothstep(0.0, 0.35, depthT) * 0.3; float sparkle = microNoise * (0.6 + abs(vWave) * 1.8); float sparkleThresh = getStochasticNoise(textureCoord * 0.3 + vec2(uTime * 0.02)); float sparkleMask = step(0.62, sparkle * sparkleThresh + sparkle * 0.4); vec3 pathColorDawn = vec3(1.0, 0.65, 0.25); vec3 pathColorNoon = vec3(1.0, 0.95, 0.75); vec3 sunPathColor = mix(pathColorDawn, pathColorNoon, noonWeight); float pathStrength = illuminationIntensity * (0.5 + (dawnWeight + duskWeight) * 0.8) * sunAboveMtn; mixedColor += sunPathColor * columnMask * depthFade * sparkleMask * pathStrength * 0.85; vec3 eyeToPlane = normalize(vWorldPos - vec3(0.0, 2.2, 6.0)); vec3 reflectedRay = reflect(eyeToPlane, flatNormal); float safeDenominator = max(0.001, abs(reflectedRay.z)) * sign(reflectedRay.z); float t = (uSunPos.z - 6.0) / safeDenominator; vec3 traceHitPos = vec3(0.0, 2.2, 6.0) + reflectedRay * t; vec2 normalizedMirrorCoord = (traceHitPos.xy - uSunPos.xy) / (1.0 + abs(traceHitPos.z) * 0.016); float mirrorSunDist = length(normalizedMirrorCoord); vec2 rotPos = normalizedMirrorCoord; float spinX = uTime * 0.005; float spinY = uTime * 0.008; vec2 rotatedHit = vec2(rotPos.x * cos(spinX) - rotPos.y * sin(spinY), rotPos.x * sin(spinX) + rotPos.y * cos(spinY)); float crystalFacetGrid = max(abs(rotatedHit.x + rotatedHit.y), abs(rotatedHit.x - rotatedHit.y)); float sunMirrorMask = smoothstep(1.6, 1.3, mirrorSunDist) * (0.6 + 0.4 * smoothstep(0.0, 1.2, crystalFacetGrid)); vec3 sunReflectColor = vec3(1.0, 0.55, 0.20) * 1.6; mixedColor = mix(mixedColor, sunReflectColor, sunMirrorMask * noonWeight * 0.75 * (1.0 - fresnel) * sunAboveMtn); float waveAmp = abs(vWave); vec2 waveShift = distortionOffset * 1.8; float dLen = length(distortionOffset) + 0.001; vec2 spreadAxis = vec2(-distortionOffset.y, distortionOffset.x) / dLen; float spreadMag = waveAmp * 1.4 + 0.25; float heightMask1 = smoothstep(1.5, -0.2, abs(uShapePos1.y - (-3.85))); float heightMask2 = smoothstep(1.5, -0.2, abs(uShapePos2.y - (-3.85))); vec2 centre = vWorldPos.xz + waveShift; vec2 tap1   = centre + spreadAxis * spreadMag; vec2 tap2   = centre - spreadAxis * spreadMag; float shimmer1 = (smoothstep(2.2, 0.0, distance(centre, uShapePos1.xz)) +                   smoothstep(2.2, 0.0, distance(tap1,   uShapePos1.xz)) +                   smoothstep(2.2, 0.0, distance(tap2,   uShapePos1.xz))) * heightMask1 / 3.0; float shimmer2 = (smoothstep(2.5, 0.0, distance(centre, uShapePos2.xz)) +                   smoothstep(2.5, 0.0, distance(tap1,   uShapePos2.xz)) +                   smoothstep(2.5, 0.0, distance(tap2,   uShapePos2.xz))) * heightMask2 / 3.0; float localReflectionShimmer = shimmer1 + shimmer2; vec3 retroReflectionWireColor = vec3(0.12, 0.14, 0.24); mixedColor = mix(mixedColor, retroReflectionWireColor, clamp(localReflectionShimmer, 0.0, 1.0) * 0.65 * (1.0 - fresnel)); vec3 activeSkyColor = (vec3(0.45, 0.65, 0.85) * noonWeight + vec3(0.40, 0.25, 0.45) * duskWeight + vec3(0.03, 0.03, 0.08) * midnightWeight + vec3(0.75, 0.45, 0.45) * dawnWeight) / total; float linearFogFactor = smoothstep(14.0, 36.0, vViewPosition.z); mixedColor = mix(mixedColor, activeSkyColor, linearFogFactor * 0.95); float shorelineFade = smoothstep(0.18, 0.35, vUv.y); float finalAlpha = mix(0.0, mix(0.35, 0.92, fresnel), shorelineFade); if(ditheredFoam > 0.5) { finalAlpha = 0.95 * shorelineFade; } gl_FragColor = vec4(mixedColor, finalAlpha); }";
-
-    let waterGeo = new THREE.PlaneGeometry(90, 42, 50, 120);
-    waterMat = new THREE.ShaderMaterial({
-      vertexShader: waterVertexShader,
-      fragmentShader: waterFragmentShader,
-      uniforms: {
-        uTime: { value: 0 },
-        uDayCycle: { value: 0 },
-        uSunPos: { value: new THREE.Vector3(0, 0, 0) },
-        uShapePos1: { value: new THREE.Vector3(0, 0, 0) },
-        uShapePos2: { value: new THREE.Vector3(0, 0, 0) }
-      },
-      transparent: true, depthWrite: false, depthTest: true, blending: THREE.NormalBlending, flatShading: false
-    });
-    window.activeWaterMat = waterMat;
-
-    waterMesh = new THREE.Mesh(waterGeo, waterMat);
-    waterMesh.rotation.x = -Math.PI / 2.0;
-    waterMesh.position.set(0, -4.05, -16.0);
-    waterMesh.renderOrder = 2;
-    scene.add(waterMesh);
-
-    // --- 6. Environmental Lighting ---
-    sunLight = new THREE.DirectionalLight(0xfffbe8, 2.5);
-    sunLight.castShadow = false;
-    scene.add(sunLight);
-    // target must be in the scene for DirectionalLight to aim correctly
-    scene.add(sunLight.target);
-
-    // Separate cool directional for moonlight
-    window.moonLight = new THREE.DirectionalLight(0x8899cc, 0.0);
-    scene.add(window.moonLight);
-    scene.add(window.moonLight.target);
-
-    // Moon point light — local fill glow on nearby geometry at night
-    window.moonPointLight = new THREE.PointLight(0x8899ee, 0.0, 200);
-    scene.add(window.moonPointLight);
-
-    // Warm point light co-located with orb for local glow
-    window.sunPointLight = new THREE.PointLight(0xff9944, 1.8, 80);
-    scene.add(window.sunPointLight);
-    ambient = new THREE.AmbientLight(0xffffff, 0.3);
-    scene.add(ambient);
-
-    // Sun mesh removed — atmosphere handled by sky scatter + lighting.
-    window.activeSunMat = null;
-
-    // --- Moon mesh — dedicated low-poly icosahedron, night only ---
-    let moonVertShader = "varying vec3 vNormal; void main() { vNormal = normalize(normalMatrix * normal); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }";
-    let moonFragShader = "uniform float uNightBlend; uniform float uElevFactor; varying vec3 vNormal; void main() { vec3 moonBase = vec3(0.82, 0.88, 1.0); float facetLight = max(0.45, dot(vNormal, normalize(vec3(0.2, 0.5, 1.0)))); vec3 col = moonBase * facetLight * 1.5; float alpha = clamp(uNightBlend * uElevFactor * 1.5, 0.0, 1.0); if (alpha < 0.008) discard; gl_FragColor = vec4(col, alpha); }";
-    let moonGeo = new THREE.IcosahedronGeometry(1.4, 2).toNonIndexed();
-    moonGeo.computeVertexNormals();
-    window.moonMeshMat = new THREE.ShaderMaterial({
-      vertexShader: moonVertShader,
-      fragmentShader: moonFragShader,
-      uniforms: { uNightBlend: { value: 0.0 }, uElevFactor: { value: 0.0 } },
-      flatShading: true,
-      transparent: true,
-      depthTest: true,   // mountains write depth → moon is occluded by them naturally
-      depthWrite: false,
-      side: THREE.FrontSide
-    });
-    window.moonMesh = new THREE.Mesh(moonGeo, window.moonMeshMat);
-    window.moonMesh.frustumCulled = false;
-    window.moonMesh.renderOrder = 2;
-    scene.add(window.moonMesh);
-
-    // --- Horizon Mountains — low-poly faceted with green canopy on peaks ---
-    // Use fewer segments for large visible faces, then toNonIndexed() so each
-    // triangle gets its own flat normal — producing genuine hard-edged low-poly facets.
-    let mountainGeoBase = new THREE.PlaneGeometry(140, 12, 38, 9);
-    let basePosArr = mountainGeoBase.attributes.position.array;
-
-    // Multi-octave ridge deformation
-    function mtnHeight(px, py) {
-      let h  = Math.sin(px * 0.22) * 2.8 + Math.cos(px * 0.09) * 1.6;
-      h     += Math.sin(px * 0.55 + 1.2) * 1.1 + Math.cos(px * 0.38) * 0.8;
-      h     += Math.sin(px * 1.10 + 2.4) * 0.4;
-      let heightT = (py + 6.0) / 12.0;
-      return h * Math.max(0, heightT);
-    }
-
-    for (let i = 0; i < basePosArr.length; i += 3) {
-      let px = basePosArr[i], py = basePosArr[i+1];
-      if (py > -5.5) basePosArr[i+1] = py + mtnHeight(px, py);
-    }
-
-    // toNonIndexed: every triangle becomes independent → flat per-face normals
-    let mountainGeo = mountainGeoBase.toNonIndexed();
-    mountainGeo.computeVertexNormals();
-
-    // Assign vertex colours — iterate over non-indexed verts
-    let posArr = mountainGeo.attributes.position.array;
-    let vertCount = posArr.length / 3;
-    let colors = [];
-    for (let i = 0; i < vertCount; i++) {
-      let px = posArr[i*3], py = posArr[i*3+1];
-      let heightT = Math.max(0, Math.min(1, (py + 2.0) / 9.0));
-
-      // Rock: purple-brown at base → slate-blue at mid
-      let rRock = 0.12 + heightT * 0.20 + Math.sin(px * 0.15) * 0.06;
-      let gRock = 0.06 + heightT * 0.12 + Math.cos(px * 0.22) * 0.03;
-      let bRock = 0.13 + heightT * 0.24 + Math.sin(px * 0.18 + 1.0) * 0.06;
-
-      // Canopy green blended onto upper peaks
-      let canopyT = Math.max(0, (heightT - 0.50) / 0.50);
-      let canopyBlend = canopyT * canopyT;
-      let rGreen = 0.07 + Math.sin(px * 0.28) * 0.04 + canopyT * 0.08;
-      let gGreen = 0.28 + Math.sin(px * 0.19 + 1.0) * 0.07 + canopyT * 0.18 + Math.cos(px * 0.53) * 0.05;
-      let bGreen = 0.05 + Math.cos(px * 0.35) * 0.02;
-
-      colors.push(
-        rRock * (1-canopyBlend) + rGreen * canopyBlend,
-        gRock * (1-canopyBlend) + gGreen * canopyBlend,
-        bRock * (1-canopyBlend) + bGreen * canopyBlend
-      );
-    }
-    mountainGeo.setAttribute('aMtnColor', new THREE.Float32BufferAttribute(colors, 3));
-
-    let mtnVertSh = "attribute vec3 aMtnColor; varying vec3 vColor; varying float vWorldY; varying vec3 vNorm; void main() { vColor = aMtnColor; vNorm = normalize(mat3(modelMatrix) * normal); vec4 wp = modelMatrix * vec4(position, 1.0); vWorldY = wp.y; gl_Position = projectionMatrix * viewMatrix * wp; }";
-    let mtnFragSh = "uniform float uDayCycle; uniform vec3 uSunDir; uniform vec3 uRimColor; varying vec3 vColor; varying float vWorldY; varying vec3 vNorm; void main() { if(vWorldY < -6.00) discard; float angle = uDayCycle * 6.283185; float midW = max(0.0,cos(angle)); float dawnW = max(0.0,sin(angle)); float noonW = max(0.0,-cos(angle)); float duskW = max(0.0,-sin(angle)); float total = midW+dawnW+noonW+duskW; vec3 nightC=vec3(0.04,0.02,0.10); vec3 dawnC=vec3(0.24,0.11,0.18); vec3 dayC=vec3(0.16,0.24,0.30); vec3 duskC=vec3(0.18,0.08,0.14); vec3 baseC=(dayC*noonW+duskC*duskW+nightC*midW+dawnC*dawnW)/total; vec3 lightDir = normalize(-uSunDir); float diffuse = max(0.0, dot(vNorm, lightDir)); float dayStrength = noonW * 1.0 + dawnW * 0.6 + duskW * 0.5; float ambient = 0.45 + midW * 0.12; float light = clamp(ambient + diffuse * dayStrength * 0.8, 0.0, 1.8); vec3 col = mix(baseC, vColor * baseC * 3.5, 0.45) * light + uRimColor; gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0); }";
-    window.horizonMountainMat = new THREE.ShaderMaterial({
-      vertexShader: mtnVertSh,
-      fragmentShader: mtnFragSh,
-      uniforms: { uDayCycle: { value: 0.0 }, uRimColor: { value: new THREE.Color(0,0,0) }, uSunDir: { value: new THREE.Vector3(0, 1, 0) } },
-      side: THREE.FrontSide
-    });
-
-    let horizonMountains = new THREE.Mesh(mountainGeo, window.horizonMountainMat);
-    horizonMountains.position.set(0, -4.1, -38.0);
-    horizonMountains.scale.set(1.5, 1.0, 1.0);
-    horizonMountains.renderOrder = 3;
-    scene.add(horizonMountains);
-
-    // Vegetation baked into mountain vertex colours — no separate mesh needed
-    
-    // --- Island Trees — low-poly palms with wind sway ---
-    (function() {
-      let islandPosY = -4.1;
-      let islandScaleX = 1.5;
-      let islandZ = -38.0;
-
-      // Sway shader: vertices above baseY (the trunk base) are displaced
-      // by a sine wave scaled by their height above the base.
-      // uTime drives the wave, uSeed offsets phase per tree.
-      // uBaseY is the world Y of the trunk base so sway = 0 at root.
-      let swayVert = [
-        "uniform float uTime;",
-        "uniform float uSeed;",
-        "uniform float uTopY;",   // local Y of trunk top (frond attachment)
-        "void main() {",
-        "  vec3 pos = position;",
-        // How far up the tree is this vertex? 0 at base, 1 at top
-        "  float t = clamp(pos.y / max(0.001, uTopY), 0.0, 1.0);",
-        // Sway amplitude grows quadratically with height
-        "  float sway = sin(uTime * 1.8 + uSeed) * 0.12 * t * t;",
-        "  float swayZ = cos(uTime * 1.4 + uSeed + 1.2) * 0.05 * t * t;",
-        "  pos.x += sway;",
-        "  pos.z += swayZ;",
-        "  gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);",
-        "}"
-      ].join("\n");
-
-      let trunkFrag = [
-        "uniform float uDayCycle;",
-        "void main() {",
-        "  float a = uDayCycle * 6.283185;",
-        "  float noonW = max(0.0,-cos(a)); float nightW = max(0.0,cos(a));",
-        "  float light = 0.35 + noonW*0.55 + nightW*0.05;",
-        "  gl_FragColor = vec4(vec3(0.12,0.07,0.03)*light, 1.0);",
-        "}"
-      ].join("\n");
-
-      let frondFrag = [
-        "uniform float uDayCycle;",
-        "void main() {",
-        "  float a = uDayCycle * 6.283185;",
-        "  float noonW=max(0.0,-cos(a)); float dawnW=max(0.0,sin(a));",
-        "  float duskW=max(0.0,-sin(a)); float nightW=max(0.0,cos(a));",
-        "  float light = noonW*1.3 + dawnW*0.8 + duskW*0.65 + nightW*0.15;",
-        "  gl_FragColor = vec4(vec3(0.07,0.22,0.05)*max(light,0.12), 1.0);",
-        "}"
-      ].join("\n");
-
-      // Store all sway materials for per-frame time update
-      window.treeMats = [];
-
-      function makePalmAt(wx, wy, wz, scale) {
-        let seed = Math.random() * 100.0;
-        let topY = 1.0 * scale;
-        let s = scale;
-
-        let trunkMat = new THREE.ShaderMaterial({
-          vertexShader: swayVert, fragmentShader: trunkFrag,
-          uniforms: {
-            uTime: { value: 0 }, uSeed: { value: seed },
-            uTopY: { value: topY }, uDayCycle: { value: 0 }
-          },
-          side: THREE.DoubleSide
-        });
-        let frondMat = new THREE.ShaderMaterial({
-          vertexShader: swayVert, fragmentShader: frondFrag,
-          uniforms: {
-            uTime: { value: 0 }, uSeed: { value: seed + 0.5 },
-            uTopY: { value: topY }, uDayCycle: { value: 0 }
-          },
-          side: THREE.DoubleSide
-        });
-        window.treeMats.push(trunkMat, frondMat);
-
-        let tree = new THREE.Group();
-
-        // Trunk
-        let trunkGeo = new THREE.BufferGeometry();
-        let tv = new Float32Array([
-          -0.055*s, 0,      0,   0.055*s, 0,      0,   0.038*s, topY, 0,
-          -0.055*s, 0,      0,   0.038*s, topY,   0,  -0.038*s, topY, 0,
-        ]);
-        trunkGeo.setAttribute('position', new THREE.BufferAttribute(tv, 3));
-        let tm = new THREE.Mesh(trunkGeo, trunkMat);
-        tm.renderOrder = 4; tm.frustumCulled = false;
-        tree.add(tm);
-
-        // Fronds — 5 triangles from trunk top
-        let frondGeo = new THREE.BufferGeometry();
-        let fv = [];
-        for (let f = 0; f < 5; f++) {
-          let a = (f / 5) * Math.PI * 2;
-          fv.push(
-            0,           topY,           0,
-            Math.cos(a)*0.85*s,  (0.72+Math.cos(a)*0.08)*s,  Math.sin(a)*0.32*s,
-            Math.cos(a+0.5)*0.32*s, topY * 1.04, Math.sin(a+0.5)*0.13*s
-          );
-        }
-        frondGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(fv), 3));
-        let fm = new THREE.Mesh(frondGeo, frondMat);
-        fm.renderOrder = 4; fm.frustumCulled = false;
-        tree.add(fm);
-
-        tree.position.set(wx, wy, wz);
-        tree.rotation.y = Math.random() * Math.PI * 2;
-        return tree;
-      }
-
-      // Dense placement across three height rows
-      for (let lx = -66; lx <= 66; lx += 2.2) {
-        let placed = false;
-        for (let localPy of [-1.0, 0, 1.0, 2.0, -2.0]) {
-          if (placed) break;
-          let peakH = mtnHeight(lx, localPy);
-          let worldY = islandPosY + localPy + peakH;
-          if (worldY > -3.85 && worldY < 0.5 && Math.random() > 0.38) {
-            let treeScale = 0.30 + Math.random() * 0.50;
-            let xOff = (Math.random() - 0.5) * 1.5;
-            scene.add(makePalmAt(
-              (lx + xOff) * islandScaleX,
-              worldY,
-              islandZ + (Math.random() - 0.5) * 0.9,
-              treeScale
-            ));
-            placed = true;
-          }
-        }
-      }
-    })();
-
-        // --- Mountain water reflection ---
-    // Vertically flipped copy of the mountain geometry, placed just below the water line.
-    // A dedicated fragment shader clips it to the water surface and adds wave distortion.
-    let mtnReflGeo = new THREE.PlaneGeometry(140, 12, 18, 5);
-    let mtnReflPos = mtnReflGeo.attributes.position.array;
-    // Same deformation as mountain using shared mtnHeight function
-    let mtnReflMinY = Infinity;
-    for (let i = 0; i < mtnReflPos.length; i += 3) {
-      let px = mtnReflPos[i], py = mtnReflPos[i+1];
-      if (py > -5.5) mtnReflPos[i+1] = py + mtnHeight(px, py);
-      if (mtnReflPos[i+1] < mtnReflMinY) mtnReflMinY = mtnReflPos[i+1];
-    }
-    // Flip vertically around the water line (y=0 in local space → world -4.1)
-    // We mirror about py = mtnReflMinY so the ridge peak points downward
-    for (let i = 0; i < mtnReflPos.length; i += 3) {
-      mtnReflPos[i+1] = mtnReflMinY - (mtnReflPos[i+1] - mtnReflMinY);
-    }
-    mtnReflGeo.computeVertexNormals();
-
-    let mtnReflVertSh = "varying float vWorldY; varying vec2 vWorldXZ; void main() { vec4 wp = modelMatrix * vec4(position, 1.0); vWorldY = wp.y; vWorldXZ = wp.xz; gl_Position = projectionMatrix * viewMatrix * wp; }";
-    let mtnReflFragSh = "uniform float uDayCycle; uniform float uTime; varying float vWorldY; varying vec2 vWorldXZ; void main() { float waterLine = -4.05; if(vWorldY > waterLine + 0.05) discard; float distBelow = waterLine - vWorldY; if(distBelow > 4.2) discard; float fadeOut = 1.0 - smoothstep(0.5, 4.2, distBelow); float waveRipple = sin(vWorldXZ.x * 1.8 + uTime * 1.2) * 0.018 + cos(vWorldXZ.y * 2.3 + uTime * 0.8) * 0.012; float shimmer = 0.72 + waveRipple * 8.0; float angle = uDayCycle * 6.283185; float midW=max(0.,cos(angle)); float dawnW=max(0.,sin(angle)); float noonW=max(0.,-cos(angle)); float duskW=max(0.,-sin(angle)); float total=midW+dawnW+noonW+duskW; vec3 nightC=vec3(0.04,0.02,0.10); vec3 dawnC=vec3(0.20,0.09,0.16); vec3 dayC=vec3(0.12,0.18,0.24); vec3 duskC=vec3(0.14,0.06,0.11); vec3 col=(dayC*noonW+duskC*duskW+nightC*midW+dawnC*dawnW)/total; col *= shimmer; float alpha = fadeOut * 0.48 * (1.0 + waveRipple * 2.0); gl_FragColor = vec4(col, clamp(alpha, 0.0, 0.55)); }";
-
-    window.mtnReflMat = new THREE.ShaderMaterial({
-      vertexShader: mtnReflVertSh,
-      fragmentShader: mtnReflFragSh,
-      uniforms: { uDayCycle: { value: 0.0 }, uTime: { value: 0.0 } },
-      transparent: true,
-      depthWrite: false,
-      side: THREE.FrontSide
-    });
-    let mtnReflMesh = new THREE.Mesh(mtnReflGeo, window.mtnReflMat);
-    // Position: same X/Z as mountain, Y flipped so peak is below waterline
-    mtnReflMesh.position.set(0, -4.1 + mtnReflMinY * 2.0 + 0.05, -38.0);
-    mtnReflMesh.scale.set(1.5, 1.0, 1.0);
-    mtnReflMesh.renderOrder = 3;
-    scene.add(mtnReflMesh);
-
-    // --- 7. Glass Wireframe Shape Actors ---
-    let lensVertexShader = "varying vec3 vNormal; void main() { vNormal = normalize(normalMatrix * normal); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }";
-    let lensFragmentShader = "uniform float uDayCycle; varying vec3 vNormal; void main() { vec3 nightCore = vec3(0.05, 0.12, 0.35); vec3 dayCore = vec3(0.85, 0.92, 1.0); vec3 chromaticShift = vec3(0.12, 0.0, 0.15) * abs(vNormal.x); vec3 surfaceTint = mix(nightCore, dayCore, sin(uDayCycle * 3.14159)); vec3 prismColor = surfaceTint + chromaticShift; float lensEdgeClarity = smoothstep(0.1, 0.8, abs(vNormal.z)); vec3 popColor = mix(vec3(1.0, 0.55, 0.15), vec3(1.0, 0.95, 0.85), uDayCycle); vec3 shieldedCore = mix(chromaticShift, popColor, 0.45); gl_FragColor = vec4(shieldedCore, 0.82); }";
-
-    window.geoHigh = new THREE.IcosahedronGeometry(0.8, 2);
-    window.geoMed  = new THREE.IcosahedronGeometry(0.8, 1);
-    window.geoLow  = new THREE.IcosahedronGeometry(0.8, 0);
-
-    // Contrast-adaptive wireframe shader:
-    // Each fragment checks its world Y against the mountain ridge.
-    // Above ridge → against sky → dark wire when sky is bright, light when dark.
-    // Below ridge → against dark mountain → always light wire.
-    // Night phase → neon hue driven by uHue uniform.
-    let wireVertSh = "varying vec3 vWorldPos; void main() { vec4 wp = modelMatrix * vec4(position, 1.0); vWorldPos = wp.xyz; gl_Position = projectionMatrix * viewMatrix * wp; }";
-    let wireFragSh = [
-      "uniform float uSkyLum;",
-      "uniform float uNightBlend;",
-      "uniform float uHue;",
-      "uniform float uMtnY;",
-      "uniform float uWaterY;",
-      "uniform float uSandY;",
-      "uniform float uOpacity;",
-      "varying vec3 vWorldPos;",
-      "vec3 hsl2rgb(float h, float s, float l) {",
-      "  float c = (1.0 - abs(2.0*l - 1.0)) * s;",
-      "  float x = c * (1.0 - abs(mod(h*6.0, 2.0) - 1.0));",
-      "  float m = l - c*0.5;",
-      "  vec3 rgb;",
-      "  if(h < 1.0/6.0)      rgb = vec3(c,x,0);",
-      "  else if(h < 2.0/6.0) rgb = vec3(x,c,0);",
-      "  else if(h < 3.0/6.0) rgb = vec3(0,c,x);",
-      "  else if(h < 4.0/6.0) rgb = vec3(0,x,c);",
-      "  else if(h < 5.0/6.0) rgb = vec3(x,0,c);",
-      "  else                  rgb = vec3(c,0,x);",
-      "  return rgb + m;",
-      "}",
-      "void main() {",
-      "  float inSky   = smoothstep(-0.3, 0.4, vWorldPos.y - uMtnY);",
-      "  float inWater = smoothstep(-0.4, 0.3, vWorldPos.y - uWaterY) * (1.0 - inSky);",
-      "  float inSand  = smoothstep(-0.3, 0.3, uSandY - vWorldPos.y) * (1.0 - inSky) * (1.0 - inWater);",
-      "  float inMtn   = 1.0 - inSky - inWater - inSand;",
-      "  float skyB   = 1.0 - pow(uSkyLum, 0.5) * 0.98;",
-      "  float mtnB   = 0.92;",
-      "  float waterB = 0.88;",
-      "  float sandB  = 0.08 + (1.0 - uSkyLum) * 0.35;",
-      "  float brightness = skyB*inSky + mtnB*inMtn + waterB*inWater + sandB*inSand;",
-      "  vec3 dayColor = vec3(brightness);",
-      "  vec3 nightColor = hsl2rgb(uHue, 1.0, 0.60);",
-      "  float nightStrength = pow(uNightBlend, 0.6);",
-      "  vec3 finalColor = mix(dayColor, nightColor, nightStrength);",
-      "  gl_FragColor = vec4(finalColor, uOpacity);",
-      "}"
-    ].join("\n");
-
-    // Helper to create a contrast-adaptive wire material with its own hue offset
-    function makeWireMat(hueOffset) {
-      return new THREE.ShaderMaterial({
-        vertexShader: wireVertSh,
-        fragmentShader: wireFragSh,
-        uniforms: {
-          uSkyLum:     { value: 0.0 },
-          uNightBlend: { value: 0.0 },
-          uHue:        { value: hueOffset },
-          uMtnY:       { value: 0.2 },
-          uWaterY:     { value: -4.05 },
-          uSandY:      { value: -3.95 },
-          uOpacity:    { value: 0.92 }
-        },
-        transparent: true,
-        wireframe: true,
-        depthWrite: false,
-        blending: THREE.NormalBlending
-      });
-    }
-
-    // Stencil-based intersection inversion:
-    // Each wireframe writes stencil=1 (increment). Where two shapes overlap,
-    // stencil=2. An inversion pass then renders where stencil>=2 with
-    // ONE_MINUS_DST_COLOR blending to invert the already-drawn wire colour.
-    function makeWireStencilMat(wireMat) {
-      // Clone the wire mat and add stencil write
-      wireMat.stencilWrite = true;
-      wireMat.stencilFunc = THREE.AlwaysStencilFunc;
-      wireMat.stencilZPass = THREE.IncrementWrapStencilOp;
-      return wireMat;
-    }
-    function makeInvertMat() {
-      return new THREE.MeshBasicMaterial({
-        color: 0xffffff,
-        wireframe: true,
-        depthWrite: false,
-        transparent: true,
-        opacity: 1.0,
-        blending: THREE.CustomBlending,
-        blendEquation: THREE.AddEquation,
-        blendSrc: THREE.OneMinusDstColorFactor,
-        blendDst: THREE.ZeroFactor,
-        stencilWrite: false,
-        stencilFunc: THREE.GreaterEqualStencilFunc,
-        stencilRef: 2,
-        stencilFuncMask: 0xff
-      });
-    }
-
-    let sphereGeo = window.geoMed;
-    let glassMat1 = new THREE.MeshBasicMaterial({ visible: false });
-    shapeSphere = new THREE.Mesh(sphereGeo, glassMat1);
-    wireMat1 = makeWireMat(0.0);
-    makeWireStencilMat(wireMat1);
-    let sphereWireMesh = new THREE.Mesh(sphereGeo, wireMat1);
-    sphereWireMesh.renderOrder = 5;
-    shapeSphere.add(sphereWireMesh);
-    let sphereInvMesh = new THREE.Mesh(sphereGeo, makeInvertMat());
-    sphereInvMesh.renderOrder = 6;
-    shapeSphere.add(sphereInvMesh);
-    window.sphereInvMesh = sphereInvMesh;
-    shapeSphere.position.set(-2.0, 1.0, -4.0);
-    shapeSphere.userData = {
-      velocity: new THREE.Vector3((Math.random()-0.5)*0.028, (Math.random()-0.5)*0.018, 0),
-      rotSpeed: new THREE.Vector3(Math.random()*0.02, Math.random()*0.02, Math.random()*0.01)
-    };
-    shapeSphere.renderOrder = 5;
-    scene.add(shapeSphere);
-
-    let triGeo = new THREE.TetrahedronGeometry(1.0);
-    let glassMat2 = new THREE.MeshBasicMaterial({ visible: false });
-    shapeTriangle = new THREE.Mesh(triGeo, glassMat2);
-    wireMat2 = makeWireMat(0.33);
-    makeWireStencilMat(wireMat2);
-    let triWireMesh = new THREE.Mesh(triGeo, wireMat2);
-    triWireMesh.renderOrder = 5;
-    shapeTriangle.add(triWireMesh);
-    let triInvMesh = new THREE.Mesh(triGeo, makeInvertMat());
-    triInvMesh.renderOrder = 6;
-    shapeTriangle.add(triInvMesh);
-    window.triInvMesh = triInvMesh;
-    shapeTriangle.position.set(2.0, 1.0, -4.0);
-    shapeTriangle.userData = {
-      velocity: new THREE.Vector3((Math.random()-0.5)*0.028, (Math.random()-0.5)*0.018, 0),
-      rotSpeed: new THREE.Vector3(Math.random()*0.01, Math.random()*0.02, Math.random()*0.01)
-    };
-    shapeTriangle.renderOrder = 5;
-    scene.add(shapeTriangle);
-
-    let cubeGeo = new THREE.BoxGeometry(1.0, 1.0, 1.0);
-    let cubeEdges = new THREE.EdgesGeometry(cubeGeo);
-    // Cube uses LineSegments — give it its own wire shader on a non-wireframe material
-    let cubeWireMat = makeWireMat(0.66);
-    cubeWireMat.wireframe = false; // LineSegments doesn't need wireframe mode
-    window.shapeCube = new THREE.LineSegments(cubeEdges, cubeWireMat);
-    window.shapeCube.position.set(0.0, 2.0, -8.0);
-    window.shapeCube.userData = {
-      velocity: new THREE.Vector3(0.026, 0.007, -0.01),
-      rotSpeed: new THREE.Vector3(0.004, 0.006, 0.002)
-    };
-    window.shapeCube.renderOrder = 5;
-    scene.add(window.shapeCube);
-
-    // --- 7b. Mirror Reflection Clones ---
-    // FIX: Mirrors are created AFTER shapeSphere and shapeTriangle exist
-    let mirrorMat = new THREE.MeshBasicMaterial({
-      color: 0x1c2235,
-      wireframe: true,
-      transparent: true,
-      opacity: 0.45
-    });
-
-    mirrorShape1 = new THREE.Mesh(shapeSphere.geometry, mirrorMat);
-    mirrorShape1.renderOrder = 3;
-    scene.add(mirrorShape1);
-
-    mirrorShape2 = new THREE.Mesh(shapeTriangle.geometry, mirrorMat);
-    mirrorShape2.renderOrder = 3;
-    scene.add(mirrorShape2);
-
-    // --- 7c. Bird Particle System ---
-    let birdGeo = new THREE.BufferGeometry();
-    let birdVertices = new Float32Array([
-      -0.4, 0.15, 0.0,   0.0, 0.0, 0.15,   0.0, 0.0, -0.12,
-       0.4, 0.15, 0.0,   0.0, 0.0, -0.12,  0.0, 0.0, 0.15
-    ]);
-    birdGeo.setAttribute('position', new THREE.BufferAttribute(birdVertices, 3));
-    birdGeo.computeVertexNormals();
-
-    birdMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
-    birdSystem = new THREE.InstancedMesh(birdGeo, birdMat, birdCount);
-
-    for (let i = 0; i < birdCount; i++) {
-      birdData.push({
-        pos: new THREE.Vector3((Math.random() - 0.5) * 15, 0.8 + Math.random() * 1.5, -8.0 - Math.random() * 4),
-        speed: 0.008 + Math.random() * 0.012,
-        wingFreq: 12 + Math.random() * 6,
-        seed: Math.random() * 100
-      });
-    }
-    birdSystem.renderOrder = 3;
-    scene.add(birdSystem);
-
-    // --- 8. Setup Actor Tracking Array ---
-    // FIX: Build actors array ONCE, correctly, with no duplicates
-    actors = [shapeSphere, shapeTriangle, window.shapeCube];
-
-    // Register global component references
-    window.activeClock = clock;
-    window.activeSkyMat = skyMat;
-    window.activeWaterMat = waterMat;
-    window.activeBeachMat = beachMat;
-    window.activeSunMat = null; // sun mesh removed
-
-    // Hide loading screen and start loop
-    document.getElementById("loadingEl").style.display = "none";
-    animate();
-
-  } // Closes initializeBeachUniverse
-
-  // --- COMPONENT MODULE 1: SHADER UNIFORM ENGINE ---
-  // FIX: Single unified function, no duplicate definition, all braces balanced
-  function updateShaderUniforms(cycle, time) {
-    if (window.activeSkyMat && window.activeSkyMat.uniforms) {
-      window.activeSkyMat.uniforms.uDayCycle.value = cycle;
-      window.activeSkyMat.uniforms.uTime.value = time;
-    }
-
-    if (window.activeWaterMat && window.activeWaterMat.uniforms) {
-      window.activeWaterMat.uniforms.uDayCycle.value = cycle;
-      window.activeWaterMat.uniforms.uTime.value = time;
-
-      // uSunPos is written by updateSolarOrbit each frame — don't overwrite here
-
-      // FIX: Use correct casing (activeWaterMat) and correct array index checks
-      if (actors && actors.length > 0 && actors[0]) {
-        window.activeWaterMat.uniforms.uShapePos1.value.copy(actors[0].position);
-      }
-      if (actors && actors.length > 1 && actors[1]) {
-        window.activeWaterMat.uniforms.uShapePos2.value.copy(actors[1].position);
-      }
-    }
-
-    // --- Mountain Atmospheric Color Cycle ---
-    if (window.horizonMountainMat && window.horizonMountainMat.uniforms) {
-      window.horizonMountainMat.uniforms.uDayCycle.value = cycle;
-
-      // Compute weights locally for rim colour
-      let _angle = cycle * 6.283185;
-      let dawnWeight = Math.max(0.0, Math.sin(_angle));
-      let duskWeight = Math.max(0.0, -Math.sin(_angle));
-
-      // Emissive rim: warm orange glow on mountain top edge at dawn/dusk
-      let rimStrength = (dawnWeight + duskWeight) * 0.55;
-      window.horizonMountainMat.uniforms.uRimColor.value.setRGB(
-        rimStrength * 0.55,
-        rimStrength * 0.22,
-        rimStrength * 0.04
-      );
-    }
-
-    if (window.vegMat && window.vegMat.uniforms) {
-      window.vegMat.uniforms.uDayCycle.value = cycle;
-    }
-    if (window.mtnReflMat && window.mtnReflMat.uniforms) {
-      window.mtnReflMat.uniforms.uDayCycle.value = cycle;
-      window.mtnReflMat.uniforms.uTime.value = time;
-    }
-    if (window.treeMats && window.treeMats.length) {
-      window.treeMats.forEach(m => {
-        if (m.uniforms.uTime)     m.uniforms.uTime.value     = time;
-        if (m.uniforms.uDayCycle) m.uniforms.uDayCycle.value = cycle;
-      });
-    }
-    if (window.activeBeachMat && window.activeBeachMat.uniforms) {
-      window.activeBeachMat.uniforms.uDayCycle.value = cycle;
-      window.activeBeachMat.uniforms.uTime.value = time;
-    }
-
-    if (window.activeSunMat && window.activeSunMat.uniforms && window.activeSunMat.uniforms.uDayCycle) {
-      window.activeSunMat.uniforms.uDayCycle.value = cycle;
-    }
-  }
-
-  // --- COMPONENT MODULE 2: ENVIRONMENTAL LIGHTING ENGINE ---
-  // sunLight colour/intensity now owned by updateSo... (26 KB left)
-  
+# External 24/7 prober — GitHub Actions path.
+#
+# Copy this file to  .github/workflows/perchance-status.yml  in a repo you own
+# (a tiny public repo is ideal). It runs every 5 minutes, probes the Perchance
+# endpoints, and publishes the JSON feed the status page ingests.
+#
+# The feed is kept on its own orphan branch (`prober-data`) as a single amended
+# commit that is force-pushed each run, so the repo does not accumulate ~288
+# commits/day of history bloat. The page then reads the feed from:
+#
+#   https://raw.githubusercontent.com/<you>/<repo>/prober-data/data/probes.json
+#
+# Paste that URL into the page's "24/7 coverage" card. GitHub serves raw files
+# public + gzip-compressed, and ignores the `?since=` query the page may append.
+#
+# Each run ALSO refreshes standalone SVG badges under data/badges/, so a README
+# can link one by URL and have it stay current on its own:
+#
+#   https://raw.githubusercontent.com/<you>/<repo>/prober-data/data/badges/overall.svg
+#
+# Available files: overall.svg, services.svg, uptime.svg, latency.svg, graph.svg,
+# plus svc-<key>.svg and up-<key>.svg for each check (e.g. svc-upload.svg). The
+# page's #badge page can generate the Markdown for you once the feed URL is set.
+#
+# The prober's store is cumulative, and the job starts from a fresh checkout, so
+# an early step pulls the previous feed back from prober-data before probing —
+# without it the history (and the uptime badges, which need >=5 samples) resets
+# every run.
+#
+# Notes:
+#  - Actions cron is best-effort: runs can be delayed a few minutes under load.
+#  - If the default branch is protected, force-pushing a *different* branch is
+#    still fine — just don't protect `prober-data`.
+#  - Prefer no-repo hosting? Use cloudflare-worker.js instead (free, KV-backed,
+#    and it can serve the `?since=` delta).
+
+name: perchance-status-prober
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: perchance-status-prober
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - name: Restore the previous feed
+        # The prober's store is CUMULATIVE — each run loads the last feed, folds
+        # in one new sample per endpoint, prunes, and rewrites it. But the job
+        # starts from a fresh checkout of the default branch, where that feed
+        # doesn't exist, so it has to be fetched back from the prober-data
+        # branch first. Without this step the store resets every run: the feed
+        # would only ever hold the single most recent minute, and the 24h/7d/120d
+        # history (plus any uptime badge, which needs >=5 samples) stays empty.
+        run: |
+          mkdir -p data
+          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/prober-data/data/probes.json" -o data/probes.json || true
+
+      - name: Probe Perchance endpoints
+        env:
+          PROBER_NAME: github-actions
+          PROBER_REGION: ${{ runner.os }}
+          PROBER_INTERVAL_SEC: "300"
+        run: node src/prober/probe.mjs data/probes.json
+
+      - name: Publish feed + hosted badges to the prober-data branch
+        run: |
+          set -euo pipefail
+          git config user.name  "perchance-status-prober"
+          git config user.email "actions@users.noreply.github.com"
+          # Stash the output outside the worktree, then publish it fresh on the
+          # orphan branch so history does not grow ~288 commits/day.
+          rm -rf /tmp/pub && mkdir -p /tmp/pub
+          cp -r data /tmp/pub/data
+          git checkout --orphan prober-data
+          git rm -rf --cached . >/dev/null 2>&1 || true
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -r /tmp/pub/data data
+          git add -A
+          git commit -m "probe feed + badges $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push -f origin prober-data
