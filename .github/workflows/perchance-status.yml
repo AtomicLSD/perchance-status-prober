@@ -13,6 +13,15 @@
 # Paste that URL into the page's "24/7 coverage" card. GitHub serves raw files
 # public + gzip-compressed, and ignores the `?since=` query the page may append.
 #
+# Each run ALSO refreshes standalone SVG badges under data/badges/, so a README
+# can link one by URL and have it stay current on its own:
+#
+#   https://raw.githubusercontent.com/<you>/<repo>/prober-data/data/badges/overall.svg
+#
+# Available files: overall.svg, services.svg, uptime.svg, latency.svg, graph.svg,
+# plus svc-<key>.svg and up-<key>.svg for each check (e.g. svc-upload.svg). The
+# page's #badge page can generate the Markdown for you once the feed URL is set.
+#
 # Notes:
 #  - Actions cron is best-effort: runs can be delayed a few minutes under load.
 #  - If the default branch is protected, force-pushing a *different* branch is
@@ -51,17 +60,19 @@ jobs:
           PROBER_INTERVAL_SEC: "300"
         run: node src/prober/probe.mjs data/probes.json
 
-      - name: Publish feed to the prober-data branch
+      - name: Publish feed + hosted badges to the prober-data branch
         run: |
           set -euo pipefail
           git config user.name  "perchance-status-prober"
           git config user.email "actions@users.noreply.github.com"
-          cp data/probes.json /tmp/probes.json
+          # Stash the output outside the worktree, then publish it fresh on the
+          # orphan branch so history does not grow ~288 commits/day.
+          rm -rf /tmp/pub && mkdir -p /tmp/pub
+          cp -r data /tmp/pub/data
           git checkout --orphan prober-data
           git rm -rf --cached . >/dev/null 2>&1 || true
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          mkdir -p data
-          cp /tmp/probes.json data/probes.json
+          cp -r /tmp/pub/data data
           git add -A
-          git commit -m "probe feed $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git commit -m "probe feed + badges $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push -f origin prober-data
