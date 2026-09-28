@@ -2,7 +2,7 @@
 #
 # Copy this file to  .github/workflows/perchance-status.yml  in a repo you own
 # (a tiny public repo is ideal). It runs every 5 minutes, probes the Perchance
-# endpoints, and publishes the JSON feed the status page ingests.
+# endpoints, and publishes the JSON feed the status page ingests .
 #
 # The feed is kept on its own orphan branch (`prober-data`) as a single amended
 # commit that is force-pushed each run, so the repo does not accumulate ~288
